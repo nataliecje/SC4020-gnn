@@ -53,19 +53,3 @@ data.val_mask = torch.zeros(num_nodes, dtype=torch.bool)
 data.val_mask[val_idx] = True
 data.test_mask = torch.zeros(num_nodes, dtype=torch.bool)
 data.test_mask[test_idx] = True
-
-# ----------------------
-# GCN Model
-# ----------------------
-class GCN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
-        super(GCN, self).__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, out_channels)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, training=self.training)
-        x = self.conv2(x, edge_index)
-        return x
