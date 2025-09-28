@@ -1,0 +1,7 @@
+Metric,Value
+Total Classes,42
+Largest Class Size,109
+Smallest Class Size,1
+Imbalance Ratio,109.00
+Classes > 50 nodes,6
+Classes < 10 nodes,14

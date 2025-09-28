@@ -1,0 +1,9 @@
+Metric,Value
+Total Nodes,1005
+Labeled Nodes,1005
+Total Edges,25571
+Number of Classes,42
+Average Degree,50.89
+Max Degree,546
+Min Degree,1
+Network Density,0.050685
