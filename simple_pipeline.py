@@ -35,6 +35,32 @@ except ImportError:
     print("Warning: NetworkX not found. Some features may be limited.")
     NETWORKX_AVAILABLE = False
 
+# Try to import the real Mamba from mamba-ssm
+try:
+    from mamba_ssm import Mamba
+    print("Using real Mamba from mamba-ssm")
+except Exception as e:
+    print("mamba-ssm not found or failed to load. Using SimpleMambaBlock (CPU fallback).")
+    
+    class Mamba(torch.nn.Module):
+        """
+        Simple CPU fallback for Mamba block.
+        Mimics sequence processing with lightweight linear layers.
+        """
+        def __init__(self, d_model, d_state=64, d_conv=4, expand=2):
+            super().__init__()
+            self.fc1 = torch.nn.Linear(d_model, d_model)
+            self.fc2 = torch.nn.Linear(d_model, d_model)
+            self.dropout = torch.nn.Dropout(0.1)
+
+        def forward(self, x):
+            # x: (batch, seq_len, d_model)
+            out = F.relu(self.fc1(x))
+            out = self.dropout(out)
+            out = self.fc2(out)
+            return out
+
+
 # Set seeds for reproducibility
 SEED = 42
 random.seed(SEED)
@@ -232,97 +258,74 @@ if TORCH_AVAILABLE:
             x = self.convs[-1](x, edge_index)
             return x
         
-    ## GRAPH MAMBA
-    class RealMambaBlock(torch.nn.Module):
-        """A wrapper for mamba-ssm’s Mamba block adapted for graph token sequences."""
-        def __init__(self, hidden_dim, d_state=None, d_conv=4, expand=2, output_reduction='mean'):
-            super().__init__()
-            self.hidden_dim = hidden_dim
-            self.output_reduction = output_reduction
-            self.mamba = Mamba(
-                d_model=hidden_dim,
-                d_state=d_state or hidden_dim,
-                d_conv=d_conv,
-                expand=expand
-            )
+    # ## GRAPH MAMBA
+    # class RealMambaBlock(torch.nn.Module):
+    #     """A wrapper for mamba-ssm’s Mamba block adapted for graph token sequences."""
+    #     def __init__(self, hidden_dim, d_state=None, d_conv=4, expand=2, output_reduction='mean'):
+    #         super().__init__()
+    #         self.hidden_dim = hidden_dim
+    #         self.output_reduction = output_reduction
+    #         self.mamba = Mamba(
+    #             d_model=hidden_dim,
+    #             d_state=d_state or hidden_dim,
+    #             d_conv=d_conv,
+    #             expand=expand
+    #         )
 
-        def forward(self, tokens, mask=None):
-            y = self.mamba(tokens)  # (N, L, hidden_dim)
-            if self.output_reduction == 'mean':
-                if mask is not None:
-                    maskf = mask.float().unsqueeze(-1)
-                    sum_vec = (y * maskf).sum(dim=1)
-                    denom = maskf.sum(dim=1).clamp(min=1.0)
-                    return sum_vec / denom
-                else:
-                    return y.mean(dim=1)
-            elif self.output_reduction == 'sum':
-                return y.sum(dim=1)
-            else:
-                return y
+    #     def forward(self, tokens, mask=None):
+    #         y = self.mamba(tokens)  # (N, L, hidden_dim)
+    #         if self.output_reduction == 'mean':
+    #             if mask is not None:
+    #                 maskf = mask.float().unsqueeze(-1)
+    #                 sum_vec = (y * maskf).sum(dim=1)
+    #                 denom = maskf.sum(dim=1).clamp(min=1.0)
+    #                 return sum_vec / denom
+    #             else:
+    #                 return y.mean(dim=1)
+    #         elif self.output_reduction == 'sum':
+    #             return y.sum(dim=1)
+    #         else:
+    #             return y
     
     class SimpleGraphMamba(torch.nn.Module):
-        """Graph Mamba: combines local GCN message passing + global Mamba sequence modeling."""
         def __init__(self, in_channels, hidden_channels, out_channels,
-                     num_layers=2, dropout=0.5,
-                     mamba_state=None, mamba_dconv=4, mamba_expand=2):
+                    num_layers=2, dropout=0.5,
+                    mamba_state=64, mamba_dconv=4, mamba_expand=2):
             super().__init__()
-            self.num_layers = num_layers
             self.dropout = dropout
 
-            # Local message passing (GCN-style)
+            # 🔹 Local GCN layers
             self.local_convs = torch.nn.ModuleList()
             self.local_convs.append(GCNConv(in_channels, hidden_channels))
             for _ in range(num_layers - 2):
                 self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
             self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
 
-            # Global Mamba block
-            self.mamba_block = RealMambaBlock(
-                hidden_dim=hidden_channels,
+            # 🔹 Mamba or fallback block
+            self.mamba_block = Mamba(
+                d_model=hidden_channels,
                 d_state=mamba_state,
                 d_conv=mamba_dconv,
-                expand=mamba_expand,
-                output_reduction='mean'
+                expand=mamba_expand
             )
 
-            self.final_lin = torch.nn.Linear(hidden_channels, out_channels)
-
-        def tokenize_neighborhoods(self, h, edge_index, max_len=16):
-            """Gather 1-hop neighbor embeddings as token sequences."""
-            N, D = h.size()
-            tokens = torch.zeros((N, max_len, D), device=h.device)
-            mask = torch.zeros((N, max_len), dtype=torch.bool, device=h.device)
-
-            # Build adjacency list
-            adj = [[] for _ in range(N)]
-            src, dst = edge_index
-            for i in range(src.size(0)):
-                adj[src[i].item()].append(dst[i].item())
-                adj[dst[i].item()].append(src[i].item())
-
-            for i in range(N):
-                neigh = adj[i][:max_len]
-                for j, n in enumerate(neigh):
-                    tokens[i, j] = h[n]
-                    mask[i, j] = True
-
-            return tokens, mask
+            # 🔹 Output classifier
+            self.fc_out = torch.nn.Linear(hidden_channels, out_channels)
 
         def forward(self, x, edge_index):
-            h = x
             for conv in self.local_convs:
-                h = conv(h, edge_index)
-                h = F.relu(h)
-                h = F.dropout(h, p=self.dropout, training=self.training)
+                x = conv(x, edge_index)
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
 
-            # Tokenize + run Mamba
-            tokens, mask = self.tokenize_neighborhoods(h, edge_index)
-            context = self.mamba_block(tokens, mask=mask)
+            # Mamba-style sequence processing
+            seq = x.unsqueeze(0)                # (1, N, hidden)
+            global_ctx = self.mamba_block(seq)  # (1, N, hidden)
+            x = x + global_ctx.squeeze(0)       # Residual fusion
 
-            # Fuse local & global info
-            h = h + context
-            return self.final_lin(h)
+            return self.fc_out(x)
+
+
 
 
 class SimpleTrainer:
@@ -495,6 +498,7 @@ class ExperimentPipeline:
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
+        
         # Train model
         trainer = SimpleTrainer(model, data, lr=kwargs.get('lr', 0.01))
         train_losses, val_f1_scores = trainer.train(epochs=kwargs.get('epochs', 100), verbose=False)
@@ -531,38 +535,87 @@ class ExperimentPipeline:
         self.results['table_a'] = results
         return results
     
+    # def run_ablation_studies(self):
+    #     """Run ablation studies"""
+    #     print("\n=== Running Ablation Studies ===")
+        
+    #     results = {}
+        
+    #     # Depth ablation for GCN
+    #     print("Depth ablation...")
+    #     results['depth'] = {}
+    #     for depth in [1, 2, 3]:
+    #         result = self.run_single_experiment('GCN', num_layers=depth)
+    #         if result:
+    #             results['depth'][depth] = {
+    #                 'micro_f1': result['test_micro_f1'],
+    #                 'macro_f1': result['test_macro_f1'],
+    #                 'accuracy': result['test_accuracy']
+    #             }
+        
+    #     # Dropout ablation for GCN
+    #     print("Dropout ablation...")
+    #     results['dropout'] = {}
+    #     for dropout in [0.0, 0.3, 0.5, 0.7]:
+    #         result = self.run_single_experiment('GCN', dropout=dropout)
+    #         if result:
+    #             results['dropout'][dropout] = {
+    #                 'micro_f1': result['test_micro_f1'],
+    #                 'macro_f1': result['test_macro_f1'],
+    #                 'accuracy': result['test_accuracy']
+    #             }
+        
+    #     # Heads ablation for GAT
+    #     print("Heads ablation...")
+    #     results['heads'] = {}
+    #     for heads in [1, 2, 4, 8]:
+    #         result = self.run_single_experiment('GAT', heads=heads)
+    #         if result:
+    #             results['heads'][heads] = {
+    #                 'micro_f1': result['test_micro_f1'],
+    #                 'macro_f1': result['test_macro_f1'],
+    #                 'accuracy': result['test_accuracy']
+    #             }
+        
+    #     self.results['ablations'] = results
+    #     return results
+    
     def run_ablation_studies(self):
         """Run ablation studies"""
         print("\n=== Running Ablation Studies ===")
         
         results = {}
-        
-        # Depth ablation for GCN
+
+        # Depth ablation for all models
         print("Depth ablation...")
         results['depth'] = {}
-        for depth in [1, 2, 3]:
-            result = self.run_single_experiment('GCN', num_layers=depth)
-            if result:
-                results['depth'][depth] = {
-                    'micro_f1': result['test_micro_f1'],
-                    'macro_f1': result['test_macro_f1'],
-                    'accuracy': result['test_accuracy']
-                }
-        
-        # Dropout ablation for GCN
+        for model_type in ['GCN', 'GAT', 'GraphMamba']:
+            results['depth'][model_type] = {}
+            for depth in [1, 2, 3]:
+                result = self.run_single_experiment(model_type, num_layers=depth)
+                if result:
+                    results['depth'][model_type][depth] = {
+                        'micro_f1': result['test_micro_f1'],
+                        'macro_f1': result['test_macro_f1'],
+                        'accuracy': result['test_accuracy']
+                    }
+
+        # Dropout ablation for all models
         print("Dropout ablation...")
         results['dropout'] = {}
-        for dropout in [0.0, 0.3, 0.5, 0.7]:
-            result = self.run_single_experiment('GCN', dropout=dropout)
-            if result:
-                results['dropout'][dropout] = {
-                    'micro_f1': result['test_micro_f1'],
-                    'macro_f1': result['test_macro_f1'],
-                    'accuracy': result['test_accuracy']
-                }
-        
+        for model_type in ['GCN', 'GAT', 'GraphMamba']:
+            results['dropout'][model_type] = {}
+            for dropout in [0.0, 0.3, 0.5, 0.7]:
+                result = self.run_single_experiment(model_type, dropout=dropout)
+                if result:
+                    results['dropout'][model_type][dropout] = {
+                        'micro_f1': result['test_micro_f1'],
+                        'macro_f1': result['test_macro_f1'],
+                        'accuracy': result['test_accuracy']
+                    }
+
         # Heads ablation for GAT
-        print("Heads ablation...")
+        print("Heads ablation for GAT...")
         results['heads'] = {}
         for heads in [1, 2, 4, 8]:
             result = self.run_single_experiment('GAT', heads=heads)
@@ -572,10 +625,96 @@ class ExperimentPipeline:
                     'macro_f1': result['test_macro_f1'],
                     'accuracy': result['test_accuracy']
                 }
-        
+
+        # Mamba state ablation for GraphMamba
+        print("Mamba state ablation for GraphMamba...")
+        results['mamba_state'] = {}
+        for state_dim in [32, 64, 128]:
+            result = self.run_single_experiment('GraphMamba', mamba_state=state_dim)
+            if result:
+                results['mamba_state'][state_dim] = {
+                    'micro_f1': result['test_micro_f1'],
+                    'macro_f1': result['test_macro_f1'],
+                    'accuracy': result['test_accuracy']
+                }
+
         self.results['ablations'] = results
         return results
+
     
+    # def create_visualizations(self):
+    #     """Create visualizations"""
+    #     print("\n=== Creating Visualizations ===")
+        
+    #     os.makedirs('results', exist_ok=True)
+        
+    #     # Training curves
+    #     if 'table_a' in self.results:
+    #         plt.figure(figsize=(12, 5))
+            
+    #         # Training loss
+    #         plt.subplot(1, 2, 1)
+    #         for model, data in self.results['table_a'].items():
+    #             if 'train_losses' in data:
+    #                 plt.plot(data['train_losses'], label=f'{model}')
+    #         plt.xlabel('Epoch')
+    #         plt.ylabel('Training Loss')
+    #         plt.title('Training Loss Curves')
+    #         plt.legend()
+    #         plt.grid(True)
+            
+    #         # Validation F1
+    #         plt.subplot(1, 2, 2)
+    #         for model, data in self.results['table_a'].items():
+    #             if 'val_f1_scores' in data:
+    #                 plt.plot(data['val_f1_scores'], label=f'{model}')
+    #         plt.xlabel('Epoch')
+    #         plt.ylabel('Validation Micro-F1')
+    #         plt.title('Validation F1 Curves')
+    #         plt.legend()
+    #         plt.grid(True)
+            
+    #         plt.tight_layout()
+    #         plt.savefig('results/training_curves.png', dpi=300, bbox_inches='tight')
+    #         plt.close()
+        
+    #     # Ablation studies
+    #     if 'ablations' in self.results:
+    #         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+    #         # Depth ablation
+    #         if 'depth' in self.results['ablations']:
+    #             depths = list(self.results['ablations']['depth'].keys())
+    #             f1_scores = [self.results['ablations']['depth'][d]['micro_f1'] for d in depths]
+    #             axes[0].plot(depths, f1_scores, 'o-')
+    #             axes[0].set_xlabel('Number of Layers')
+    #             axes[0].set_ylabel('Test Micro-F1')
+    #             axes[0].set_title('Depth Ablation (GCN)')
+    #             axes[0].grid(True)
+            
+    #         # Dropout ablation
+    #         if 'dropout' in self.results['ablations']:
+    #             dropouts = list(self.results['ablations']['dropout'].keys())
+    #             f1_scores = [self.results['ablations']['dropout'][d]['micro_f1'] for d in dropouts]
+    #             axes[1].plot(dropouts, f1_scores, 'o-')
+    #             axes[1].set_xlabel('Dropout Rate')
+    #             axes[1].set_ylabel('Test Micro-F1')
+    #             axes[1].set_title('Dropout Ablation (GCN)')
+    #             axes[1].grid(True)
+            
+    #         # Heads ablation
+    #         if 'heads' in self.results['ablations']:
+    #             heads = list(self.results['ablations']['heads'].keys())
+    #             f1_scores = [self.results['ablations']['heads'][h]['micro_f1'] for h in heads]
+    #             axes[2].plot(heads, f1_scores, 'o-')
+    #             axes[2].set_xlabel('Number of Heads')
+    #             axes[2].set_ylabel('Test Micro-F1')
+    #             axes[2].set_title('Attention Heads Ablation (GAT)')
+    #             axes[2].grid(True)
+            
+    #         plt.tight_layout()
+    #         plt.savefig('results/ablation_studies.png', dpi=300, bbox_inches='tight')
+    #         plt.close()
     def create_visualizations(self):
         """Create visualizations"""
         print("\n=== Creating Visualizations ===")
@@ -585,8 +724,6 @@ class ExperimentPipeline:
         # Training curves
         if 'table_a' in self.results:
             plt.figure(figsize=(12, 5))
-            
-            # Training loss
             plt.subplot(1, 2, 1)
             for model, data in self.results['table_a'].items():
                 if 'train_losses' in data:
@@ -597,7 +734,6 @@ class ExperimentPipeline:
             plt.legend()
             plt.grid(True)
             
-            # Validation F1
             plt.subplot(1, 2, 2)
             for model, data in self.results['table_a'].items():
                 if 'val_f1_scores' in data:
@@ -614,41 +750,47 @@ class ExperimentPipeline:
         
         # Ablation studies
         if 'ablations' in self.results:
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            
-            # Depth ablation
-            if 'depth' in self.results['ablations']:
-                depths = list(self.results['ablations']['depth'].keys())
-                f1_scores = [self.results['ablations']['depth'][d]['micro_f1'] for d in depths]
-                axes[0].plot(depths, f1_scores, 'o-')
-                axes[0].set_xlabel('Number of Layers')
-                axes[0].set_ylabel('Test Micro-F1')
-                axes[0].set_title('Depth Ablation (GCN)')
-                axes[0].grid(True)
-            
-            # Dropout ablation
-            if 'dropout' in self.results['ablations']:
-                dropouts = list(self.results['ablations']['dropout'].keys())
-                f1_scores = [self.results['ablations']['dropout'][d]['micro_f1'] for d in dropouts]
-                axes[1].plot(dropouts, f1_scores, 'o-')
-                axes[1].set_xlabel('Dropout Rate')
-                axes[1].set_ylabel('Test Micro-F1')
-                axes[1].set_title('Dropout Ablation (GCN)')
-                axes[1].grid(True)
-            
-            # Heads ablation
-            if 'heads' in self.results['ablations']:
-                heads = list(self.results['ablations']['heads'].keys())
-                f1_scores = [self.results['ablations']['heads'][h]['micro_f1'] for h in heads]
-                axes[2].plot(heads, f1_scores, 'o-')
-                axes[2].set_xlabel('Number of Heads')
-                axes[2].set_ylabel('Test Micro-F1')
-                axes[2].set_title('Attention Heads Ablation (GAT)')
-                axes[2].grid(True)
-            
-            plt.tight_layout()
-            plt.savefig('results/ablation_studies.png', dpi=300, bbox_inches='tight')
-            plt.close()
+            for study_name, study_data in self.results['ablations'].items():
+                plt.figure(figsize=(8, 5))
+                
+                # Depth / Dropout for all models
+                if study_name in ['depth', 'dropout']:
+                    for model_type, model_results in study_data.items():
+                        x_vals = list(model_results.keys())
+                        y_vals = [model_results[k]['micro_f1'] for k in x_vals]
+                        plt.plot(x_vals, y_vals, 'o-', label=model_type)
+                    
+                    xlabel = 'Number of Layers' if study_name == 'depth' else 'Dropout Rate'
+                    plt.xlabel(xlabel)
+                    plt.ylabel('Test Micro-F1')
+                    plt.title(f'{study_name.title()} Ablation')
+                    plt.grid(True)
+                    plt.legend()
+                
+                # Heads ablation (GAT)
+                elif study_name == 'heads':
+                    x_vals = list(study_data.keys())
+                    y_vals = [study_data[k]['micro_f1'] for k in x_vals]
+                    plt.plot(x_vals, y_vals, 'o-')
+                    plt.xlabel('Number of Heads')
+                    plt.ylabel('Test Micro-F1')
+                    plt.title('Heads Ablation (GAT)')
+                    plt.grid(True)
+                
+                # Mamba state ablation
+                elif study_name == 'mamba_state':
+                    x_vals = list(study_data.keys())
+                    y_vals = [study_data[k]['micro_f1'] for k in x_vals]
+                    plt.plot(x_vals, y_vals, 'o-')
+                    plt.xlabel('Mamba State Dimension')
+                    plt.ylabel('Test Micro-F1')
+                    plt.title('Mamba State Ablation (GraphMamba)')
+                    plt.grid(True)
+                
+                plt.tight_layout()
+                plt.savefig(f'results/ablation_{study_name}.png', dpi=300, bbox_inches='tight')
+                plt.close()
+
     
     def save_results(self):
         """Save results to files"""
