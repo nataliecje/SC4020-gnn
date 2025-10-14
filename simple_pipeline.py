@@ -14,7 +14,7 @@ try:
     from torch.nn import Dropout
     from torch_geometric.data import Data
     from torch_geometric.utils import to_undirected, degree
-    from torch_geometric.nn import GCNConv, GATConv
+    from torch_geometric.nn import GCNConv, GATConv, SAGEConv
     TORCH_AVAILABLE = True
 except ImportError:
     print("Warning: PyTorch/PyTorch Geometric not found. Please install dependencies.")
@@ -258,34 +258,29 @@ if TORCH_AVAILABLE:
             x = self.convs[-1](x, edge_index)
             return x
         
-    # ## GRAPH MAMBA
-    # class RealMambaBlock(torch.nn.Module):
-    #     """A wrapper for mamba-ssm’s Mamba block adapted for graph token sequences."""
-    #     def __init__(self, hidden_dim, d_state=None, d_conv=4, expand=2, output_reduction='mean'):
-    #         super().__init__()
-    #         self.hidden_dim = hidden_dim
-    #         self.output_reduction = output_reduction
-    #         self.mamba = Mamba(
-    #             d_model=hidden_dim,
-    #             d_state=d_state or hidden_dim,
-    #             d_conv=d_conv,
-    #             expand=expand
-    #         )
+    class SimpleGraphSAGE(torch.nn.Module):
+        def __init__(self, in_channels, hidden_channels, out_channels,
+                     num_layers=2, dropout=0.5, aggregator='mean'):
+            super().__init__()
+            self.num_layers = num_layers
+            self.dropout = dropout
+            self.aggregator = aggregator  # 'mean', 'max', 'pool', or 'lstm'
 
-    #     def forward(self, tokens, mask=None):
-    #         y = self.mamba(tokens)  # (N, L, hidden_dim)
-    #         if self.output_reduction == 'mean':
-    #             if mask is not None:
-    #                 maskf = mask.float().unsqueeze(-1)
-    #                 sum_vec = (y * maskf).sum(dim=1)
-    #                 denom = maskf.sum(dim=1).clamp(min=1.0)
-    #                 return sum_vec / denom
-    #             else:
-    #                 return y.mean(dim=1)
-    #         elif self.output_reduction == 'sum':
-    #             return y.sum(dim=1)
-    #         else:
-    #             return y
+            self.convs = torch.nn.ModuleList()
+            self.convs.append(SAGEConv(in_channels, hidden_channels, aggregator_type=aggregator))
+            
+            for _ in range(num_layers - 2):
+                self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggregator_type=aggregator))
+            
+            self.convs.append(SAGEConv(hidden_channels, out_channels, aggregator_type=aggregator))
+        
+        def forward(self, x, edge_index):
+            for conv in self.convs[:-1]:
+                x = conv(x, edge_index)
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
+            x = self.convs[-1](x, edge_index)
+            return x
     
     class SimpleGraphMamba(torch.nn.Module):
         def __init__(self, in_channels, hidden_channels, out_channels,
@@ -484,6 +479,15 @@ class ExperimentPipeline:
                 num_layers=kwargs.get('num_layers', 2),
                 dropout=kwargs.get('dropout', 0.5)
             )
+        elif model_type == 'GraphSAGE':
+            model = SimpleGraphSAGE(
+                in_channels=x.size(1),
+                hidden_channels=kwargs.get('hidden_channels', 64),
+                out_channels=num_classes,
+                num_layers=kwargs.get('num_layers', 2),
+                dropout=kwargs.get('dropout', 0.5),
+                aggregator=kwargs.get('aggregator', 'mean')
+            )
         elif model_type == 'GraphMamba':
             model = SimpleGraphMamba(
                 in_channels=x.size(1),
@@ -521,7 +525,7 @@ class ExperimentPipeline:
         print("\n=== Running Table A Experiments ===")
         
         results = {}
-        for model in ['GCN', 'GAT', 'GraphMamba']:
+        for model in ['GCN', 'GAT', 'GraphSAGE', 'GraphMamba']:
             result = self.run_single_experiment(model)
             if result:
                 results[model] = {
@@ -544,7 +548,7 @@ class ExperimentPipeline:
         # Depth ablation for all models
         print("Depth ablation...")
         results['depth'] = {}
-        for model_type in ['GCN', 'GAT', 'GraphMamba']:
+        for model_type in ['GCN', 'GAT', 'GraphSAGE', 'GraphMamba']:
             results['depth'][model_type] = {}
             for depth in [1, 2, 3]:
                 result = self.run_single_experiment(model_type, num_layers=depth)
@@ -558,7 +562,7 @@ class ExperimentPipeline:
         # Dropout ablation for all models
         print("Dropout ablation...")
         results['dropout'] = {}
-        for model_type in ['GCN', 'GAT', 'GraphMamba']:
+        for model_type in ['GCN', 'GAT', 'GraphSAGE', 'GraphMamba']:
             results['dropout'][model_type] = {}
             for dropout in [0.0, 0.3, 0.5, 0.7]:
                 result = self.run_single_experiment(model_type, dropout=dropout)
