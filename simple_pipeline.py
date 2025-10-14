@@ -231,6 +231,99 @@ if TORCH_AVAILABLE:
             
             x = self.convs[-1](x, edge_index)
             return x
+        
+    ## GRAPH MAMBA
+    class RealMambaBlock(torch.nn.Module):
+        """A wrapper for mamba-ssm’s Mamba block adapted for graph token sequences."""
+        def __init__(self, hidden_dim, d_state=None, d_conv=4, expand=2, output_reduction='mean'):
+            super().__init__()
+            self.hidden_dim = hidden_dim
+            self.output_reduction = output_reduction
+            self.mamba = Mamba(
+                d_model=hidden_dim,
+                d_state=d_state or hidden_dim,
+                d_conv=d_conv,
+                expand=expand
+            )
+
+        def forward(self, tokens, mask=None):
+            y = self.mamba(tokens)  # (N, L, hidden_dim)
+            if self.output_reduction == 'mean':
+                if mask is not None:
+                    maskf = mask.float().unsqueeze(-1)
+                    sum_vec = (y * maskf).sum(dim=1)
+                    denom = maskf.sum(dim=1).clamp(min=1.0)
+                    return sum_vec / denom
+                else:
+                    return y.mean(dim=1)
+            elif self.output_reduction == 'sum':
+                return y.sum(dim=1)
+            else:
+                return y
+    
+    class SimpleGraphMamba(torch.nn.Module):
+        """Graph Mamba: combines local GCN message passing + global Mamba sequence modeling."""
+        def __init__(self, in_channels, hidden_channels, out_channels,
+                     num_layers=2, dropout=0.5,
+                     mamba_state=None, mamba_dconv=4, mamba_expand=2):
+            super().__init__()
+            self.num_layers = num_layers
+            self.dropout = dropout
+
+            # Local message passing (GCN-style)
+            self.local_convs = torch.nn.ModuleList()
+            self.local_convs.append(GCNConv(in_channels, hidden_channels))
+            for _ in range(num_layers - 2):
+                self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
+            self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
+
+            # Global Mamba block
+            self.mamba_block = RealMambaBlock(
+                hidden_dim=hidden_channels,
+                d_state=mamba_state,
+                d_conv=mamba_dconv,
+                expand=mamba_expand,
+                output_reduction='mean'
+            )
+
+            self.final_lin = torch.nn.Linear(hidden_channels, out_channels)
+
+        def tokenize_neighborhoods(self, h, edge_index, max_len=16):
+            """Gather 1-hop neighbor embeddings as token sequences."""
+            N, D = h.size()
+            tokens = torch.zeros((N, max_len, D), device=h.device)
+            mask = torch.zeros((N, max_len), dtype=torch.bool, device=h.device)
+
+            # Build adjacency list
+            adj = [[] for _ in range(N)]
+            src, dst = edge_index
+            for i in range(src.size(0)):
+                adj[src[i].item()].append(dst[i].item())
+                adj[dst[i].item()].append(src[i].item())
+
+            for i in range(N):
+                neigh = adj[i][:max_len]
+                for j, n in enumerate(neigh):
+                    tokens[i, j] = h[n]
+                    mask[i, j] = True
+
+            return tokens, mask
+
+        def forward(self, x, edge_index):
+            h = x
+            for conv in self.local_convs:
+                h = conv(h, edge_index)
+                h = F.relu(h)
+                h = F.dropout(h, p=self.dropout, training=self.training)
+
+            # Tokenize + run Mamba
+            tokens, mask = self.tokenize_neighborhoods(h, edge_index)
+            context = self.mamba_block(tokens, mask=mask)
+
+            # Fuse local & global info
+            h = h + context
+            return self.final_lin(h)
+
 
 class SimpleTrainer:
     """Simple trainer with minimal dependencies"""
@@ -388,6 +481,17 @@ class ExperimentPipeline:
                 num_layers=kwargs.get('num_layers', 2),
                 dropout=kwargs.get('dropout', 0.5)
             )
+        elif model_type == 'GraphMamba':
+            model = SimpleGraphMamba(
+                in_channels=x.size(1),
+                hidden_channels=kwargs.get('hidden_channels', 64),
+                out_channels=num_classes,
+                num_layers=kwargs.get('num_layers', 2),
+                dropout=kwargs.get('dropout', 0.5),
+                mamba_state=kwargs.get('mamba_state', 64),
+                mamba_dconv=kwargs.get('mamba_dconv', 4),
+                mamba_expand=kwargs.get('mamba_expand', 2)
+            )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
@@ -413,7 +517,7 @@ class ExperimentPipeline:
         print("\n=== Running Table A Experiments ===")
         
         results = {}
-        for model in ['GCN', 'GAT']:
+        for model in ['GCN', 'GAT', 'GraphMamba']:
             result = self.run_single_experiment(model)
             if result:
                 results[model] = {
