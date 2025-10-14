@@ -505,7 +505,7 @@ class ExperimentPipeline:
         
         # Train model
         trainer = SimpleTrainer(model, data, lr=kwargs.get('lr', 0.01))
-        train_losses, val_f1_scores = trainer.train(epochs=kwargs.get('epochs', 100), verbose=False)
+        train_losses, val_f1_scores = trainer.train(epochs=kwargs.get('epochs', 200), verbose=False)
         
         # Evaluate on test set
         test_micro_f1, test_macro_f1, test_acc, y_true, y_pred = trainer.evaluate(data.test_mask)
