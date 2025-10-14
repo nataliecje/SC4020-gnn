@@ -534,52 +534,7 @@ class ExperimentPipeline:
         
         self.results['table_a'] = results
         return results
-    
-    # def run_ablation_studies(self):
-    #     """Run ablation studies"""
-    #     print("\n=== Running Ablation Studies ===")
         
-    #     results = {}
-        
-    #     # Depth ablation for GCN
-    #     print("Depth ablation...")
-    #     results['depth'] = {}
-    #     for depth in [1, 2, 3]:
-    #         result = self.run_single_experiment('GCN', num_layers=depth)
-    #         if result:
-    #             results['depth'][depth] = {
-    #                 'micro_f1': result['test_micro_f1'],
-    #                 'macro_f1': result['test_macro_f1'],
-    #                 'accuracy': result['test_accuracy']
-    #             }
-        
-    #     # Dropout ablation for GCN
-    #     print("Dropout ablation...")
-    #     results['dropout'] = {}
-    #     for dropout in [0.0, 0.3, 0.5, 0.7]:
-    #         result = self.run_single_experiment('GCN', dropout=dropout)
-    #         if result:
-    #             results['dropout'][dropout] = {
-    #                 'micro_f1': result['test_micro_f1'],
-    #                 'macro_f1': result['test_macro_f1'],
-    #                 'accuracy': result['test_accuracy']
-    #             }
-        
-    #     # Heads ablation for GAT
-    #     print("Heads ablation...")
-    #     results['heads'] = {}
-    #     for heads in [1, 2, 4, 8]:
-    #         result = self.run_single_experiment('GAT', heads=heads)
-    #         if result:
-    #             results['heads'][heads] = {
-    #                 'micro_f1': result['test_micro_f1'],
-    #                 'macro_f1': result['test_macro_f1'],
-    #                 'accuracy': result['test_accuracy']
-    #             }
-        
-    #     self.results['ablations'] = results
-    #     return results
-    
     def run_ablation_studies(self):
         """Run ablation studies"""
         print("\n=== Running Ablation Studies ===")
@@ -642,79 +597,6 @@ class ExperimentPipeline:
         return results
 
     
-    # def create_visualizations(self):
-    #     """Create visualizations"""
-    #     print("\n=== Creating Visualizations ===")
-        
-    #     os.makedirs('results', exist_ok=True)
-        
-    #     # Training curves
-    #     if 'table_a' in self.results:
-    #         plt.figure(figsize=(12, 5))
-            
-    #         # Training loss
-    #         plt.subplot(1, 2, 1)
-    #         for model, data in self.results['table_a'].items():
-    #             if 'train_losses' in data:
-    #                 plt.plot(data['train_losses'], label=f'{model}')
-    #         plt.xlabel('Epoch')
-    #         plt.ylabel('Training Loss')
-    #         plt.title('Training Loss Curves')
-    #         plt.legend()
-    #         plt.grid(True)
-            
-    #         # Validation F1
-    #         plt.subplot(1, 2, 2)
-    #         for model, data in self.results['table_a'].items():
-    #             if 'val_f1_scores' in data:
-    #                 plt.plot(data['val_f1_scores'], label=f'{model}')
-    #         plt.xlabel('Epoch')
-    #         plt.ylabel('Validation Micro-F1')
-    #         plt.title('Validation F1 Curves')
-    #         plt.legend()
-    #         plt.grid(True)
-            
-    #         plt.tight_layout()
-    #         plt.savefig('results/training_curves.png', dpi=300, bbox_inches='tight')
-    #         plt.close()
-        
-    #     # Ablation studies
-    #     if 'ablations' in self.results:
-    #         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            
-    #         # Depth ablation
-    #         if 'depth' in self.results['ablations']:
-    #             depths = list(self.results['ablations']['depth'].keys())
-    #             f1_scores = [self.results['ablations']['depth'][d]['micro_f1'] for d in depths]
-    #             axes[0].plot(depths, f1_scores, 'o-')
-    #             axes[0].set_xlabel('Number of Layers')
-    #             axes[0].set_ylabel('Test Micro-F1')
-    #             axes[0].set_title('Depth Ablation (GCN)')
-    #             axes[0].grid(True)
-            
-    #         # Dropout ablation
-    #         if 'dropout' in self.results['ablations']:
-    #             dropouts = list(self.results['ablations']['dropout'].keys())
-    #             f1_scores = [self.results['ablations']['dropout'][d]['micro_f1'] for d in dropouts]
-    #             axes[1].plot(dropouts, f1_scores, 'o-')
-    #             axes[1].set_xlabel('Dropout Rate')
-    #             axes[1].set_ylabel('Test Micro-F1')
-    #             axes[1].set_title('Dropout Ablation (GCN)')
-    #             axes[1].grid(True)
-            
-    #         # Heads ablation
-    #         if 'heads' in self.results['ablations']:
-    #             heads = list(self.results['ablations']['heads'].keys())
-    #             f1_scores = [self.results['ablations']['heads'][h]['micro_f1'] for h in heads]
-    #             axes[2].plot(heads, f1_scores, 'o-')
-    #             axes[2].set_xlabel('Number of Heads')
-    #             axes[2].set_ylabel('Test Micro-F1')
-    #             axes[2].set_title('Attention Heads Ablation (GAT)')
-    #             axes[2].grid(True)
-            
-    #         plt.tight_layout()
-    #         plt.savefig('results/ablation_studies.png', dpi=300, bbox_inches='tight')
-    #         plt.close()
     def create_visualizations(self):
         """Create visualizations"""
         print("\n=== Creating Visualizations ===")
