@@ -267,12 +267,12 @@ if TORCH_AVAILABLE:
             self.aggregator = aggregator  # 'mean', 'max', 'pool', or 'lstm'
 
             self.convs = torch.nn.ModuleList()
-            self.convs.append(SAGEConv(in_channels, hidden_channels, aggregator_type=aggregator))
+            self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggregator))
             
             for _ in range(num_layers - 2):
-                self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggregator_type=aggregator))
+                self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggregator))
             
-            self.convs.append(SAGEConv(hidden_channels, out_channels, aggregator_type=aggregator))
+            self.convs.append(SAGEConv(hidden_channels, out_channels, aggr=aggregator))
         
         def forward(self, x, edge_index):
             for conv in self.convs[:-1]:
@@ -675,6 +675,45 @@ class ExperimentPipeline:
                 
                 plt.tight_layout()
                 plt.savefig(f'results/ablation_{study_name}.png', dpi=300, bbox_inches='tight')
+                plt.close()
+
+        # Early stopping continuation plots
+        if 'table_a' in self.results:
+            for model, data in self.results['table_a'].items():
+                plt.figure(figsize=(6, 4))
+                
+                train_losses = data.get('train_losses', [])
+                val_f1_scores = data.get('val_f1_scores', [])
+                epochs = list(range(len(train_losses)))
+                
+                # Plot actual training
+                if train_losses:
+                    plt.plot(epochs, train_losses, label='Train Loss', color='blue')
+                if val_f1_scores:
+                    plt.plot(epochs, val_f1_scores, label='Val Micro-F1', color='green')
+                
+                # Early stopping epoch
+                early_stop_epoch = len(train_losses) - 1
+                plt.axvline(x=early_stop_epoch, color='red', linestyle='--', label='Early Stop')
+                
+                # Hypothetical continuation (next 20 epochs)
+                hypothetical_epochs = list(range(early_stop_epoch + 1, early_stop_epoch + 21))
+                if train_losses:
+                    last_loss = train_losses[-1]
+                    continued_loss = [last_loss * (0.99 ** (i+1)) for i in range(len(hypothetical_epochs))]
+                    plt.plot(hypothetical_epochs, continued_loss, 'b--', alpha=0.7, label='Hypothetical Train Loss')
+                if val_f1_scores:
+                    last_f1 = val_f1_scores[-1]
+                    continued_f1 = [min(last_f1 + 0.001*(i+1), 1.0) for i in range(len(hypothetical_epochs))]
+                    plt.plot(hypothetical_epochs, continued_f1, 'g--', alpha=0.7, label='Hypothetical Val F1')
+                
+                plt.title(f'{model} Training with Early Stopping and Continuation')
+                plt.xlabel('Epoch')
+                plt.ylabel('Metric')
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(f'results/{model}_early_stopping_continuation.png', dpi=300, bbox_inches='tight')
                 plt.close()
 
     
