@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import defaultdict
 import json
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+
 
 # Try to import PyTorch components with fallbacks
 try:
@@ -282,10 +284,19 @@ if TORCH_AVAILABLE:
             x = self.convs[-1](x, edge_index)
             return x
     
-    class SimpleGraphMamba(torch.nn.Module):
+    # HYBRID MODEL
+    class SimpleGraphTransformer(torch.nn.Module):
         def __init__(self, in_channels, hidden_channels, out_channels,
-                    num_layers=2, dropout=0.5,
-                    mamba_state=64, mamba_dconv=4, mamba_expand=2):
+                    num_layers=2, dropout=0.3,
+                    nhead=2, num_transformer_layers=1,
+                    dim_feedforward=None):
+            """
+            Optimized Graph Transformer (lightweight, CPU/GPU compatible)
+            - fewer attention heads
+            - smaller feedforward layers
+            - less dropout
+            - efficient residual structure
+            """
             super().__init__()
             self.dropout = dropout
 
@@ -296,32 +307,37 @@ if TORCH_AVAILABLE:
                 self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
             self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
 
-            # 🔹 Mamba or fallback block
-            self.mamba_block = Mamba(
+            # 🔹 Lightweight Transformer Encoder
+            if dim_feedforward is None:
+                dim_feedforward = hidden_channels * 2  # smaller feedforward size
+
+            encoder_layer = TransformerEncoderLayer(
                 d_model=hidden_channels,
-                d_state=mamba_state,
-                d_conv=mamba_dconv,
-                expand=mamba_expand
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+                activation="gelu"
             )
+            self.global_block = TransformerEncoder(encoder_layer, num_layers=num_transformer_layers)
 
             # 🔹 Output classifier
             self.fc_out = torch.nn.Linear(hidden_channels, out_channels)
 
         def forward(self, x, edge_index):
+            # Local message passing
             for conv in self.local_convs:
                 x = conv(x, edge_index)
-                x = F.relu(x)
+                x = F.gelu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
 
-            # Mamba-style sequence processing
-            seq = x.unsqueeze(0)                # (1, N, hidden)
-            global_ctx = self.mamba_block(seq)  # (1, N, hidden)
-            x = x + global_ctx.squeeze(0)       # Residual fusion
+            # Treat nodes as sequence for Transformer
+            seq = x.unsqueeze(0)  # (1, N, hidden)
+            global_ctx = self.global_block(seq)  # (1, N, hidden)
 
+            # Residual fusion
+            x = x + global_ctx.squeeze(0)
             return self.fc_out(x)
-
-
-
 
 class SimpleTrainer:
     """Simple trainer with minimal dependencies"""
@@ -488,17 +504,18 @@ class ExperimentPipeline:
                 dropout=kwargs.get('dropout', 0.5),
                 aggregator=kwargs.get('aggregator', 'mean')
             )
-        elif model_type == 'GraphMamba':
-            model = SimpleGraphMamba(
+        elif model_type == 'GraphTransformer': 
+            model = SimpleGraphTransformer(
                 in_channels=x.size(1),
                 hidden_channels=kwargs.get('hidden_channels', 64),
                 out_channels=num_classes,
                 num_layers=kwargs.get('num_layers', 2),
-                dropout=kwargs.get('dropout', 0.5),
-                mamba_state=kwargs.get('mamba_state', 64),
-                mamba_dconv=kwargs.get('mamba_dconv', 4),
-                mamba_expand=kwargs.get('mamba_expand', 2)
+                dropout=kwargs.get('dropout', 0.3),
+                nhead=kwargs.get('nhead', 2),
+                num_transformer_layers=kwargs.get('num_transformer_layers', 1),
+                dim_feedforward=kwargs.get('dim_feedforward', 128)
             )
+
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
@@ -525,7 +542,7 @@ class ExperimentPipeline:
         print("\n=== Running Table A Experiments ===")
         
         results = {}
-        for model in ['GCN', 'GAT', 'GraphSAGE', 'GraphMamba']:
+        for model in ['GCN', 'GAT', 'GraphSAGE', 'GraphTransformer']:
             result = self.run_single_experiment(model)
             if result:
                 results[model] = {
@@ -548,7 +565,7 @@ class ExperimentPipeline:
         # Depth ablation for all models
         print("Depth ablation...")
         results['depth'] = {}
-        for model_type in ['GCN', 'GAT', 'GraphSAGE', 'GraphMamba']:
+        for model_type in ['GCN', 'GAT', 'GraphSAGE', 'GraphTransformer']:
             results['depth'][model_type] = {}
             for depth in [1, 2, 3]:
                 result = self.run_single_experiment(model_type, num_layers=depth)
@@ -562,7 +579,7 @@ class ExperimentPipeline:
         # Dropout ablation for all models
         print("Dropout ablation...")
         results['dropout'] = {}
-        for model_type in ['GCN', 'GAT', 'GraphSAGE', 'GraphMamba']:
+        for model_type in ['GCN', 'GAT', 'GraphSAGE', 'GraphTransformer']:
             results['dropout'][model_type] = {}
             for dropout in [0.0, 0.3, 0.5, 0.7]:
                 result = self.run_single_experiment(model_type, dropout=dropout)
@@ -584,19 +601,6 @@ class ExperimentPipeline:
                     'macro_f1': result['test_macro_f1'],
                     'accuracy': result['test_accuracy']
                 }
-
-        # Mamba state ablation for GraphMamba
-        print("Mamba state ablation for GraphMamba...")
-        results['mamba_state'] = {}
-        for state_dim in [32, 64, 128]:
-            result = self.run_single_experiment('GraphMamba', mamba_state=state_dim)
-            if result:
-                results['mamba_state'][state_dim] = {
-                    'micro_f1': result['test_micro_f1'],
-                    'macro_f1': result['test_macro_f1'],
-                    'accuracy': result['test_accuracy']
-                }
-
         self.results['ablations'] = results
         return results
 
@@ -663,15 +667,15 @@ class ExperimentPipeline:
                     plt.title('Heads Ablation (GAT)')
                     plt.grid(True)
                 
-                # Mamba state ablation
-                elif study_name == 'mamba_state':
-                    x_vals = list(study_data.keys())
-                    y_vals = [study_data[k]['micro_f1'] for k in x_vals]
-                    plt.plot(x_vals, y_vals, 'o-')
-                    plt.xlabel('Mamba State Dimension')
-                    plt.ylabel('Test Micro-F1')
-                    plt.title('Mamba State Ablation (GraphMamba)')
-                    plt.grid(True)
+                # # Mamba state ablation
+                # elif study_name == 'mamba_state':
+                #     x_vals = list(study_data.keys())
+                #     y_vals = [study_data[k]['micro_f1'] for k in x_vals]
+                #     plt.plot(x_vals, y_vals, 'o-')
+                #     plt.xlabel('Mamba State Dimension')
+                #     plt.ylabel('Test Micro-F1')
+                #     plt.title('Mamba State Ablation (GraphMamba)')
+                #     plt.grid(True)
                 
                 plt.tight_layout()
                 plt.savefig(f'results/ablation_{study_name}.png', dpi=300, bbox_inches='tight')
