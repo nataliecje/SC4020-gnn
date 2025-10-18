@@ -8,7 +8,6 @@ from collections import defaultdict
 import json
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 
-
 # Try to import PyTorch components with fallbacks
 try:
     import torch
@@ -300,14 +299,14 @@ if TORCH_AVAILABLE:
             super().__init__()
             self.dropout = dropout
 
-            # 🔹 Local GCN layers
+            # Local GCN layers
             self.local_convs = torch.nn.ModuleList()
             self.local_convs.append(GCNConv(in_channels, hidden_channels))
             for _ in range(num_layers - 2):
                 self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
             self.local_convs.append(GCNConv(hidden_channels, hidden_channels))
 
-            # 🔹 Lightweight Transformer Encoder
+            # Lightweight Transformer Encoder
             if dim_feedforward is None:
                 dim_feedforward = hidden_channels * 2  # smaller feedforward size
 
@@ -321,7 +320,7 @@ if TORCH_AVAILABLE:
             )
             self.global_block = TransformerEncoder(encoder_layer, num_layers=num_transformer_layers)
 
-            # 🔹 Output classifier
+            # Output classifier
             self.fc_out = torch.nn.Linear(hidden_channels, out_channels)
 
         def forward(self, x, edge_index):
@@ -353,14 +352,32 @@ class SimpleTrainer:
         self.train_losses = []
         self.val_f1_scores = []
         
-    def train_epoch(self):
+    def train_epoch(self, num_batches=2):
         self.model.train()
-        self.optimizer.zero_grad()
-        out = self.model(self.data.x, self.data.edge_index)
-        loss = F.cross_entropy(out[self.data.train_mask], self.data.y[self.data.train_mask])
-        loss.backward()
-        self.optimizer.step()
-        return loss.item()
+        train_nodes = self.data.train_mask.nonzero(as_tuple=False).view(-1)
+
+        # Initialize fixed node splits (only once)
+        if not hasattr(self, 'fixed_batches'):
+            perm = torch.randperm(len(train_nodes))
+            split_size = len(train_nodes) // num_batches
+            self.fixed_batches = [
+                train_nodes[perm[i*split_size:(i+1)*split_size]] 
+                for i in range(num_batches - 1)
+            ]
+            # last batch gets any leftovers
+            self.fixed_batches.append(train_nodes[perm[(num_batches-1)*split_size:]])
+
+        batch_losses = []
+        for batch_idx in self.fixed_batches:
+            self.optimizer.zero_grad()
+            out = self.model(self.data.x, self.data.edge_index)
+            loss = F.cross_entropy(out[batch_idx], self.data.y[batch_idx])
+            loss.backward()
+            self.optimizer.step()
+            batch_losses.append(loss.item())
+
+        # Return averaged loss for smoother tracking
+        return np.mean(batch_losses)
         
     def evaluate(self, mask):
         self.model.eval()
@@ -611,6 +628,19 @@ class ExperimentPipeline:
         
         os.makedirs('results', exist_ok=True)
         
+    def _smooth_curve(self, values, window=5):
+        """Simple moving average smoothing that preserves original length."""
+        try:
+            vals = np.array(values)
+        except Exception:
+            return values
+        if vals.size < window or window <= 1:
+            return vals
+        weights = np.ones(window) / window
+        smoothed = np.convolve(vals, weights, mode='valid')
+        pad = np.full(len(vals) - len(smoothed), vals[0])
+        return np.concatenate([pad, smoothed])
+
         # Training curves
         if 'table_a' in self.results:
             plt.figure(figsize=(12, 5))
@@ -627,7 +657,9 @@ class ExperimentPipeline:
             plt.subplot(1, 2, 2)
             for model, data in self.results['table_a'].items():
                 if 'val_f1_scores' in data:
-                    plt.plot(data['val_f1_scores'], label=f'{model}')
+                    raw = data['val_f1_scores']
+                    sm = self._smooth_curve(raw, window=5)
+                    plt.plot(sm, label=f'{model}')
             plt.xlabel('Epoch')
             plt.ylabel('Validation Micro-F1')
             plt.title('Validation F1 Curves')
@@ -667,16 +699,6 @@ class ExperimentPipeline:
                     plt.title('Heads Ablation (GAT)')
                     plt.grid(True)
                 
-                # # Mamba state ablation
-                # elif study_name == 'mamba_state':
-                #     x_vals = list(study_data.keys())
-                #     y_vals = [study_data[k]['micro_f1'] for k in x_vals]
-                #     plt.plot(x_vals, y_vals, 'o-')
-                #     plt.xlabel('Mamba State Dimension')
-                #     plt.ylabel('Test Micro-F1')
-                #     plt.title('Mamba State Ablation (GraphMamba)')
-                #     plt.grid(True)
-                
                 plt.tight_layout()
                 plt.savefig(f'results/ablation_{study_name}.png', dpi=300, bbox_inches='tight')
                 plt.close()
@@ -694,7 +716,8 @@ class ExperimentPipeline:
                 if train_losses:
                     plt.plot(epochs, train_losses, label='Train Loss', color='blue')
                 if val_f1_scores:
-                    plt.plot(epochs, val_f1_scores, label='Val Micro-F1', color='green')
+                    sm_val = self._smooth_curve(val_f1_scores, window=5)
+                    plt.plot(epochs, sm_val, label='Val Micro-F1', color='green')
                 
                 # Early stopping epoch
                 early_stop_epoch = len(train_losses) - 1

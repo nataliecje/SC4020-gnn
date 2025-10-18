@@ -448,6 +448,18 @@ class ExperimentRunner:
         
         self.results['per_class_f1'] = per_class_results
         
+        
+    # to smoothen curve
+    def smooth_curve(values, window=5): 
+        """Apply Simple Moving Average (SMA) smoothing."""
+        if len(values) < window: return np.array(values) 
+        weights = np.ones(window) / window 
+        smoothed = np.convolve(values, weights, mode='valid') 
+        
+        # Pad to preserve original length 
+        pad = [values[0]] * (len(values) - len(smoothed)) 
+        return np.concatenate([pad, smoothed])
+
     def create_visualizations(self):
         """Create all figures"""
         print("Creating visualizations...")
@@ -458,8 +470,12 @@ class ExperimentRunner:
         # Figure 1: Training loss curves
         plt.figure(figsize=(10, 6))
         if 'table_a' in self.results['training_curves']:
-            for model, data in self.results['training_curves']['table_a'].items():
-                plt.plot(data['train_losses'], label=f'{model} Training Loss')
+            for model, data in self.results['training_curves']['table_a'].items(): 
+                if 'train_losses' in data:
+                    raw = data['train_losses']
+                    smoothed = smooth_curve(raw, window=5) # plot both raw and smoothed for comparison 
+                    plt.plot(raw, alpha=0.3, linestyle='--', label=f'{model} (raw)') 
+                    plt.plot(smoothed, linewidth=2, label=f'{model} (SMA)')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Training Loss Curves: GCN vs GAT')
@@ -553,4 +569,4 @@ class ExperimentRunner:
 if __name__ == "__main__":
     # Run all experiments
     runner = ExperimentRunner()
-    results = runner.run_all_experiments()
+    results = runner.run_all_experiments() 
