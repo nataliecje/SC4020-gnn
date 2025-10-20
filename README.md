@@ -1,8 +1,8 @@
-# 🧠 GNN Experiment Pipeline for Email-EU-Core Dataset
+# GNN Experiment Pipeline for Email-EU-Core Dataset
 
 This repository contains a comprehensive evaluation pipeline for Graph Neural Networks (GNNs) on the Email-EU-Core dataset, with advanced techniques to achieve high accuracy on organizational network classification.
 
-## 🎯 Quick Start
+## Quick Start
 
 ### **Option 1: Run Basic GNN Experiments**
 ```bash
@@ -22,7 +22,7 @@ pip install torch torch-geometric scikit-learn pandas matplotlib seaborn node2ve
 python improved_training.py
 ```
 
-## 📊 What You'll Get
+## What You'll Get
 
 ### **Experimental Results:**
 - **Table A**: Main comparison of GCN vs GAT (achieved: GCN 13.4%, GAT 15.9%)
@@ -37,7 +37,7 @@ python improved_training.py
 - **No dropout needed** for this dataset
 - **9x better than random** baseline (2.4%)
 
-## 🏗️ Dataset Overview
+## Dataset Overview
 
 **Email-EU-Core Network:**
 - **1,005 nodes** (email addresses, all labeled)
